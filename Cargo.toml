@@ -3,6 +3,7 @@ name = "ply_tokio_redis_mongodb"
 version = "0.1.0"
 edition = "2021"
 description = "Implementation of ply for the technology combination of Redis and MongoDB"
+license-file = "LICENSE"
 
 [dependencies]
 # No references to workspace here because the goal is to extract ply into an open source crate
