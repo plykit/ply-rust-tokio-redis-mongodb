@@ -1,18 +1,28 @@
+use redis::RedisError;
 use thiserror::Error;
-//use anyhow;
 
 #[derive(Error, Debug)]
-pub enum PlyError {
+pub enum Error {
     #[error("operation `{0}` is not known, valid operations: 'create', 'update', 'delete'")]
     UnknownOperation(String),
-    //#[error(transparent)]
-    //AnyError(#[from] anyhow::Error),
-    #[error("todo error")]
-    Todo,
+
+    #[error("json parse error: `{0}`")]
+    ParseError(#[from] serde_json::Error),
+
+    #[error("redis error: `{0}`")]
+    RedisError(#[from] RedisError),
+
+    #[error("Jobs error: `{0}`")]
+    JobsError(#[from] ply_jobs::Error),
+
+    //#[error("UTF8 error: `{0}`")]
+    //Utf8Error(#[from] FromUtf8Error),
+    #[error("TODO(`{0}`)")]
+    TODO(String),
 }
 
-pub type PlyResult = Result<(), PlyError>;
+pub type Result<T> = std::result::Result<T, Error>;
 
-pub fn ok() -> PlyResult {
+pub fn ok() -> Result<()> {
     Ok(())
 }

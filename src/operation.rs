@@ -1,7 +1,7 @@
+use crate::error::Error;
 use serde::{Deserialize, Serialize};
-use crate::error::PlyError;
 
-#[derive(Clone, Debug,Serialize,Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Operation {
     Create,
     Update,
@@ -9,38 +9,38 @@ pub enum Operation {
 }
 
 impl TryFrom<String> for Operation {
-    type Error = PlyError;
+    type Error = Error;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         match value.as_str() {
             "create" => Ok(Self::Create),
             "update" => Ok(Self::Update),
             "delete" => Ok(Self::Delete),
-            _ => Err(PlyError::UnknownOperation(value)),
+            _ => Err(Error::UnknownOperation(value)),
         }
     }
 }
 impl TryFrom<&str> for Operation {
-    type Error = PlyError;
+    type Error = Error;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
             "create" => Ok(Self::Create),
             "update" => Ok(Self::Update),
             "delete" => Ok(Self::Delete),
-            _ => Err(PlyError::UnknownOperation(value.into())),
+            _ => Err(Error::UnknownOperation(value.into())),
         }
     }
 }
 impl TryFrom<&String> for Operation {
-    type Error = PlyError;
+    type Error = Error;
 
     fn try_from(value: &String) -> Result<Self, Self::Error> {
         match (*value).as_str() {
             "create" => Ok(Self::Create),
             "update" => Ok(Self::Update),
             "delete" => Ok(Self::Delete),
-            _ => Err(PlyError::UnknownOperation(value.clone())),
+            _ => Err(Error::UnknownOperation(value.clone())),
         }
     }
 }
