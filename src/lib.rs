@@ -46,7 +46,7 @@ fn key(kind: &str, op: &Operation) -> String {
 
 pub struct Ply {
     redis_connection: MultiplexedConnection,
-    job_manager: JobManager<MongoRepo>,
+    job_manager: JobManager<MongoRepo, Error>,
     tab: HashMap<String, Box<dyn Callback + 'static + Send + Sync>>,
 }
 
@@ -96,7 +96,7 @@ impl Ply {
     }
 }
 
-pub struct ConsumeCtrl(JobManager<MongoRepo>);
+pub struct ConsumeCtrl(JobManager<MongoRepo, Error>);
 
 // TODO Implement methods for the inner job manager on top of ConsumeCtrl
 
@@ -132,39 +132,36 @@ impl Publisher {
 
 #[async_trait]
 impl ply_jobs::Job for Consumer {
-    async fn call(&mut self, state: Vec<u8>) -> ply_jobs::Result<Vec<u8>> {
+    type Error = Error;
+    async fn call(&mut self, state: Vec<u8>) -> std::result::Result<Vec<u8>, Self::Error> {
         let mut last_seen = if state.len() == 0 {
             String::from("0")
         } else {
-            String::from_utf8(state).map_err(|_e| ply_jobs::Error::TODO)?
+            String::from_utf8(state)?
         };
         let opts = StreamReadOptions::default().count(20);
         let results: StreamReadReply = self
             .redis_connection
             .xread_options(&[EVENT_STREAM], &[last_seen.as_str()], &opts)
-            .await
-            .map_err(|_e| ply_jobs::Error::TODO)?;
+            .await?;
 
         // let entries = results.keys.first().ok_or_else(Error::TODO(String::from(
         //     "reading streamyielded unexpected result",
         // )))?;
         let entries = results.keys.first().unwrap();
         for id in &entries.ids {
-            match id
-                .map
-                .get(MESSAGE_FIELD).unwrap()
-                // .ok_or_else(Error::TODO(String::from("no message field in id")))?
-            {
-                Value::Data(data) => {
-                    let msg: Msg = serde_json::from_slice(data).map_err(|_e| ply_jobs::Error::TODO)?;
+            match id.map.get(MESSAGE_FIELD) {
+                None => return Err(Error::TODO(String::from("no message field in id"))),
+                Some(Value::Data(data)) => {
+                    let msg: Msg = serde_json::from_slice(data)?;
                     let key = key(&msg.kind, &msg.op);
                     dbg!(&key);
                     match self.tab.get(key.as_str()) {
                         None => (),
-                        Some(z) => z.call(msg).await.map_err(|_e| ply_jobs::Error::TODO)?,
+                        Some(z) => z.call(msg).await?,
                     }
                 }
-                _ => {
+                Some(_) => {
                     error!("unexpected value format"); // TODO How to report this properly
                     continue;
                 }

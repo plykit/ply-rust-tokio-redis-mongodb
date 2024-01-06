@@ -1,6 +1,6 @@
 [package]
 name = "ply_tokio_redis_mongodb"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Implementation of ply for the technology combination of Redis and MongoDB"
 license = "MIT-0"
@@ -15,7 +15,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = [] }
 log = "0.4.20"
 simple_logger = "4.2.0"
-ply_jobs = { version = "0.1.2", features = ["mongodb"] }
+ply_jobs = { version = "0.1.3", features = ["mongodb"] }
 #ply_jobs = { path = "../jobs-rust-tokio", features = ["mongodb"] }
 async-trait = "0.1.75"
 mongodb = "2.6.0"

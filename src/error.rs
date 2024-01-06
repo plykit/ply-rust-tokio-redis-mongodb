@@ -1,4 +1,5 @@
 use redis::RedisError;
+use std::string::FromUtf8Error;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -15,8 +16,8 @@ pub enum Error {
     #[error("Jobs error: `{0}`")]
     JobsError(#[from] ply_jobs::Error),
 
-    //#[error("UTF8 error: `{0}`")]
-    //Utf8Error(#[from] FromUtf8Error),
+    #[error("UTF8 error: `{0}`")]
+    Utf8Error(#[from] FromUtf8Error),
     #[error("TODO(`{0}`)")]
     TODO(String),
 }

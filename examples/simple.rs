@@ -50,7 +50,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     ply.register(Item::kind(), Operation::Create, make(http_client));
 
     let publisher = ply.publisher();
-    let consume_ctrl = ply.consume();
+    let _consume_ctrl = ply.consume();
 
     tokio::spawn(async move {
         let principal = String::from("frodo");
