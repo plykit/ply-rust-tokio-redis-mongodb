@@ -165,7 +165,6 @@ impl ply_jobs::Job for Consumer {
                     }
                 }
                 _ => {
-                    dbg!("komisch");
                     error!("unexpected value format"); // TODO How to report this properly
                     continue;
                 }
