@@ -1,19 +1,18 @@
-use std::collections::HashMap;
-use std::future::Future;
-
+use async_trait::async_trait;
 use futures_util::future::BoxFuture;
 use futures_util::future::FutureExt;
 use log::{error, info};
+use ply_jobs::{schedule, JobConfig, JobManager, MongoRepo};
 use redis;
+use redis::aio::{Connection, MultiplexedConnection};
+use redis::streams::{StreamReadOptions, StreamReadReply};
 use redis::{AsyncCommands, FromRedisValue, RedisFuture, RedisResult, Value};
-use redis::aio::Connection;
 use serde_json;
+use std::collections::HashMap;
+use std::future::Future;
+use std::marker::PhantomData;
+use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::mpsc;
-use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::mpsc::error::SendError;
-use tokio::time;
-use tokio::time::sleep;
 
 pub use error::ok;
 pub use error::PlyError;
@@ -23,23 +22,14 @@ pub use msg::Msg;
 pub use msg::ToMsg;
 pub use operation::Operation;
 
-use crate::Error::Unknown;
-
 mod error;
 mod msg;
 mod operation;
 
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("send error")]
-    Disconnect(#[from] SendError<Msg>),
-    // #[error("the data for key `{0}` is not available")]
-    // Redaction(String),
-    // #[error("invalid header (expected {expected:?}, found {found:?})")]
-    // InvalidHeader {
-    //     expected: String,
-    //     found: String,
-    // },
+    #[error("TODO(`{0}`)")]
+    TODO(String),
     #[error("unknown data store error")]
     Unknown,
 }
@@ -49,9 +39,9 @@ pub trait Callback {
 }
 
 impl<F, R> Callback for F
-    where
-        F: Fn(Msg) -> R,
-        R: Future<Output=PlyResult> + Send + 'static,
+where
+    F: Fn(Msg) -> R,
+    R: Future<Output = PlyResult> + Send + Sync + 'static,
 {
     #[inline]
     fn call(&self, args: Msg) -> BoxFuture<PlyResult> {
@@ -59,68 +49,85 @@ impl<F, R> Callback for F
     }
 }
 
-pub struct Ply {
-    redis_connection: Connection,
-    rx: Receiver<Msg>,
-    handle: PlyHandle,
+pub struct PlyMain {
+    redis_connection: MultiplexedConnection,
+    job_manager: JobManager<MongoRepo>,
+    tab: HashMap<String, Box<dyn Callback + 'static + Send + Sync>>,
+}
+pub struct PlyMain2 {
+    redis_connection: MultiplexedConnection,
+    tab: HashMap<String, Box<dyn Callback + 'static + Send + Sync>>,
 }
 
-#[derive(Clone, Debug)]
-pub struct PlyHandle {
-    tx: Sender<Msg>,
+pub fn ply(
+    instance: String,
+    redis_connection: MultiplexedConnection,
+    mongodb_client: mongodb::Client,
+) -> PlyMain {
+    let job_manager = JobManager::new(instance, MongoRepo::new(mongodb_client));
+    PlyMain {
+        redis_connection,
+        job_manager,
+        tab: Default::default(),
+    }
+}
+
+impl PlyMain {
+    pub fn register<F>(&mut self, s: &str, op: Operation, cb: F)
+    where
+        F: Callback + Clone + 'static + Send + Sync,
+    {
+        self.tab.insert(key(s, &op), Box::new(cb));
+    }
+
+    pub fn ply(&self) -> Ply {
+        Ply {
+            redis_connection: self.redis_connection.clone(),
+        }
+    }
+    pub fn fix(mut self) -> X {
+        let mut job_manager = self.job_manager;
+        let x = PlyMain2 {
+            redis_connection: self.redis_connection,
+            tab: self.tab,
+        };
+        let config =
+            JobConfig::new("xx", schedule::secondly()).with_check_interval(Duration::from_secs(3));
+        job_manager.register(config, x);
+        job_manager.start_all().unwrap();
+        X(job_manager)
+    }
+}
+
+pub struct X(JobManager<MongoRepo>);
+
+#[derive(Clone)]
+pub struct Ply {
+    redis_connection: MultiplexedConnection,
 }
 
 impl Ply {
-    pub fn new(redis_connection: Connection) -> Self {
-        let (tx, rx) = mpsc::channel::<Msg>(32);
-
-        Self {
-            redis_connection,
-            rx,
-            handle: PlyHandle { tx },
-        }
-    }
-    pub fn handle(&self) -> &PlyHandle {
-        &self.handle
-    }
-    pub async fn run(mut self) {
-        while let Some(message) = self.rx.recv().await {
-            let d: String = serde_json::to_string(&message).unwrap();
-
-            let x: RedisFuture<Foo> = self.redis_connection.lpush("topic", d.as_str());
-
-            if let Err(e) = x.await {
-                dbg!(e);
-            }
-            info!("lpush done")
-        }
-    }
-    // pub async fn run2(mut self) {
-    //     while let Some(message) = self.rx.recv().await {
-    //         println!("GOT = {}", message.id);
-    //         let v: Vec<(String, String)> = vec![(String::from("message"), message.id)];
-    //
-    //         let x: RedisFuture<Foo> = self.redis_connection.xadd("queue", "*", &v);
-    //
-    //         if let Err(e) = x.await {
-    //             dbg!(e);
-    //         }
-    //     }
-    // }
-}
-
-impl PlyHandle {
-    pub fn publish<A: ToMsg>(&self, principal: String, op: Operation, a: A) -> impl Future<Output=Result<(), Error>> {
-        let s = self.clone();
+    pub fn publish<A: ToMsg>(
+        &self,
+        principal: String,
+        op: Operation,
+        a: A,
+    ) -> impl Future<Output = Result<(), Error>> {
+        let mut s = self.clone();
         async move {
-            s.tx.send(a.into_msg(principal, op))
-                .await
-                .map_err(|_e| Unknown)
-        }
-    }
+            let message = a.into_msg(principal, op);
+            let d: String = serde_json::to_string(&message).unwrap();
+            let v: Vec<(String, String)> = vec![
+                ("message".to_string(), d),
+                ("bla".to_string(), "blub".to_string()),
+            ];
+            let x: RedisFuture<Foo> = s.redis_connection.xadd("events", "*", &v);
 
-    pub fn consumer(&self) -> PlyConsumer {
-        PlyConsumer::new()
+            match x.await {
+                Ok(_) => Ok(()),
+                Err(e) => Err(Error::TODO(e.to_string())),
+            }
+        }
     }
 }
 
@@ -132,71 +139,60 @@ impl FromRedisValue for Foo {
     }
 }
 
-pub struct PlyConsumer {
-    tab: HashMap<String, Box<dyn Callback + 'static + Send>>,
-}
-
-impl PlyConsumer {
-    pub fn new() -> Self {
-        Self {
-            tab: Default::default(),
-        }
-    }
-
-    pub fn register<F>(&mut self, s: &str, op: Operation, cb: F)
-        where
-            F: Callback + Clone + 'static + Send,
-    {
-        self.tab.insert(key(s, &op), Box::new(cb));
-    }
-
-    pub async fn test(self, msg: Msg) {
-        let key = key(&msg.kind, &msg.op);
-        let e = self.tab.get(key.as_str()).unwrap();
-        let _x = e.call(msg);
-
-        //x.await;
-        todo!()
-    }
-
-    // pub async fn run(mut redis_connection: Connection) {
-    //     let start
-    //     loop {
-    //         let f = redis_connection.xread("events","*",)
-    //         f.await
-    //
-    //         sleep(time::Duration::from_secs(1)).await
-    //
-    //     }
-    // }
-    pub async fn run(self, mut redis_connection: Connection) {
-        loop {
-            let f: RedisFuture<Option<String>> = redis_connection.lpop("topic", None);
-            match f.await {
-                RedisResult::Err(e) => {
-                    error!("lpop error: {:?}",e);
-                }
-                RedisResult::Ok(None) => {
-                    info!("lpop: empty");
-                }
-                RedisResult::Ok(Some(m)) => {
-                    info!("lpop: ok");
-                    let xx = m.clone();
-                    info!("lpop: ok-string: {}",xx);
-
-                    let msg: Msg = serde_json::from_str(m.as_str()).unwrap();
-                    let key = key(&msg.kind, &msg.op);
-                    let e = self.tab.get(key.as_str()).unwrap();
-                    let x = e.call(msg);
-                    x.await.expect("callback to be ok")
-                }
-            }
-
-            sleep(time::Duration::from_secs(1)).await
-        }
-    }
-}
-
 fn key(kind: &str, op: &Operation) -> String {
     format!("{}:{}", kind, op.as_ref())
+}
+
+#[async_trait]
+impl ply_jobs::Job for PlyMain2 {
+    async fn call(&mut self, state: Vec<u8>) -> ply_jobs::Result<Vec<u8>> {
+        let mut last_seen = if state.len() == 0 {
+            String::from("0")
+        } else {
+            String::from_utf8(state).unwrap()
+        };
+        let opts = StreamReadOptions::default().count(1);
+        let results: RedisResult<StreamReadReply> = self
+            .redis_connection
+            .xread_options(&["events"], &[last_seen.as_str()], &opts)
+            .await;
+
+        let x = results.unwrap();
+        let entries = x.keys.first().unwrap();
+
+        for id in &entries.ids {
+            match id.map.get("message").unwrap() {
+                Value::Data(data) => {
+                    //dbg!(data);
+                    let msg: Msg = serde_json::from_slice(data).unwrap();
+                    let key = key(&msg.kind, &msg.op);
+                    dbg!(&key);
+                    match self.tab.get(key.as_str()) {
+                        None => (),
+                        Some(z) => {
+                            dbg!("some");
+                            z.call(msg).await.unwrap();
+                        }
+                    }
+                }
+                _ => {
+                    dbg!("komisch");
+                    continue;
+                } // Value::Nil => {}
+                  // Value::Int(_) => {}
+                  // Value::Bulk(_) => {}
+                  // Value::Status(_) => {}
+                  // Value::Okay => {}
+            }
+            last_seen = id.id.clone();
+            dbg!(&last_seen);
+        }
+
+        Ok(last_seen.as_bytes().to_vec())
+
+        // match results {
+        //     Ok(x) => Ok(state),
+        //     Err(e) => Err(ply_jobs::Error::TODO(e.to_string())),
+        // }
+    }
 }

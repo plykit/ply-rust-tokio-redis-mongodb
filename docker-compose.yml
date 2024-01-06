@@ -1,0 +1,25 @@
+version: '3.8'
+services:
+  mongodb:
+    image: mongo:latest
+    ports:
+      - '27017:27017'
+    volumes:
+      - dbdata6:/data/db
+  redis:
+    image: redis:latest
+    restart: always
+    ports:
+      - "6379:6379"
+    #volumes:
+      #- /path/to/local/dаta:/root/redis
+      #- /path/to/local/redis.conf:/usr/local/etc/redis/redis.conf
+      #- ./dаta:/root/redis
+      #- ./conf/redis.conf:/usr/local/etc/redis/redis.conf
+    environment:
+      - REDIS_PASSWORD=admin
+      - REDIS_PORT=6379
+      - REDIS_DATABASES=16
+volumes:
+  dbdata6:
+
