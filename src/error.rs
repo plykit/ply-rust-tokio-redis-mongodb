@@ -14,7 +14,7 @@ pub enum Error {
     RedisError(#[from] RedisError),
 
     #[error("Jobs error: `{0}`")]
-    JobsError(#[from] ply_jobs::Error),
+    JobsError(#[from] ply_jobs::JobError),
 
     #[error("UTF8 error: `{0}`")]
     Utf8Error(#[from] FromUtf8Error),

@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use futures_util::future::BoxFuture;
 use futures_util::future::FutureExt;
 use log::error;
-use ply_jobs::{schedule, JobConfig, JobManager, MongoRepo};
+use ply_jobs::{schedule, JobConfig, JobError, JobManager, MongoRepo};
 use redis;
 use redis::aio::MultiplexedConnection;
 use redis::streams::{StreamReadOptions, StreamReadReply};
@@ -46,7 +46,7 @@ fn key(kind: &str, op: &Operation) -> String {
 
 pub struct Ply {
     redis_connection: MultiplexedConnection,
-    job_manager: JobManager<MongoRepo, Error>,
+    job_manager: JobManager<MongoRepo>,
     tab: HashMap<String, Box<dyn Callback + 'static + Send + Sync>>,
 }
 
@@ -91,12 +91,12 @@ impl Ply {
         let config = JobConfig::new(JOB_COLLECTION, schedule::secondly())
             .with_check_interval(Duration::from_secs(1));
         job_manager.register(config, consumer);
-        job_manager.start_all()?;
+        job_manager.start_all();
         Ok(ConsumeCtrl(job_manager))
     }
 }
 
-pub struct ConsumeCtrl(JobManager<MongoRepo, Error>);
+pub struct ConsumeCtrl(JobManager<MongoRepo>);
 
 // TODO Implement methods for the inner job manager on top of ConsumeCtrl
 
@@ -132,18 +132,18 @@ impl Publisher {
 
 #[async_trait]
 impl ply_jobs::Job for Consumer {
-    type Error = Error;
-    async fn call(&mut self, state: Vec<u8>) -> std::result::Result<Vec<u8>, Self::Error> {
+    async fn call(&mut self, state: Vec<u8>) -> std::result::Result<Vec<u8>, JobError> {
         let mut last_seen = if state.len() == 0 {
             String::from("0")
         } else {
-            String::from_utf8(state)?
+            String::from_utf8(state).map_err(JobError::any)?
         };
         let opts = StreamReadOptions::default().count(20);
         let results: StreamReadReply = self
             .redis_connection
             .xread_options(&[EVENT_STREAM], &[last_seen.as_str()], &opts)
-            .await?;
+            .await
+            .map_err(JobError::any)?;
 
         // let entries = results.keys.first().ok_or_else(Error::TODO(String::from(
         //     "reading streamyielded unexpected result",
@@ -151,14 +151,14 @@ impl ply_jobs::Job for Consumer {
         let entries = results.keys.first().unwrap();
         for id in &entries.ids {
             match id.map.get(MESSAGE_FIELD) {
-                None => return Err(Error::TODO(String::from("no message field in id"))),
+                None => return Err(JobError::from("no message field in id")),
                 Some(Value::Data(data)) => {
-                    let msg: Msg = serde_json::from_slice(data)?;
+                    let msg: Msg = serde_json::from_slice(data).map_err(JobError::any)?;
                     let key = key(&msg.kind, &msg.op);
                     dbg!(&key);
                     match self.tab.get(key.as_str()) {
                         None => (),
-                        Some(z) => z.call(msg).await?,
+                        Some(z) => z.call(msg).await.map_err(JobError::any)?,
                     }
                 }
                 Some(_) => {
