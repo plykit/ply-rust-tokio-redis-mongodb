@@ -54,6 +54,15 @@ impl From<Operation> for String {
         }
     }
 }
+impl From<&Operation> for String {
+    fn from(op: &Operation) -> Self {
+        match op {
+            Operation::Create => String::from("create"),
+            Operation::Update => String::from("update"),
+            Operation::Delete => String::from("delete"),
+        }
+    }
+}
 
 impl AsRef<str> for Operation {
     fn as_ref(&self) -> &str {

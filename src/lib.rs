@@ -1,15 +1,17 @@
 use async_trait::async_trait;
 use futures_util::future::BoxFuture;
 use futures_util::future::FutureExt;
-use log::error;
+use log::{debug, error, info, trace};
 use ply_jobs::{schedule, JobConfig, JobError, JobManager, MongoRepo};
 use redis;
 use redis::aio::MultiplexedConnection;
-use redis::streams::{StreamReadOptions, StreamReadReply};
+use redis::streams::{StreamId, StreamReadOptions, StreamReadReply};
 use redis::{AsyncCommands, FromRedisValue, RedisResult, Value};
 use serde_json;
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::future::Future;
+use std::os::unix::prelude::DirEntryExt;
 use std::time::Duration;
 
 pub use error::{ok, Error, Result};
@@ -23,6 +25,10 @@ mod operation;
 const JOB_COLLECTION: &str = "ply-jobs";
 const EVENT_STREAM: &str = "ply-events";
 const REDIS_AUTO_ID: &str = "*";
+const PRINCIPAL_FIELD: &str = "principal";
+const KIND_FIELD: &str = "kind";
+const ID_FIELD: &str = "id";
+const OP_FIELD: &str = "op";
 const MESSAGE_FIELD: &str = "message";
 
 pub trait Callback {
@@ -32,7 +38,7 @@ pub trait Callback {
 impl<F, R> Callback for F
 where
     F: Fn(Msg) -> R,
-    R: Future<Output = Result<()>> + Send + Sync + 'static,
+    R: Future<Output = Result<()>> + Send + 'static,
 {
     #[inline]
     fn call(&self, args: Msg) -> BoxFuture<Result<()>> {
@@ -40,19 +46,19 @@ where
     }
 }
 
-fn key(kind: &str, op: &Operation) -> String {
+fn key(kind: &str, op: impl AsRef<str>) -> String {
     format!("{}:{}", kind, op.as_ref())
 }
 
 pub struct Ply {
     redis_connection: MultiplexedConnection,
     job_manager: JobManager<MongoRepo>,
-    tab: HashMap<String, Box<dyn Callback + 'static + Send + Sync>>,
+    tab: HashMap<String, Box<dyn Callback + 'static + Send>>,
 }
 
 struct Consumer {
     redis_connection: MultiplexedConnection,
-    tab: HashMap<String, Box<dyn Callback + 'static + Send + Sync>>,
+    tab: HashMap<String, Box<dyn Callback + 'static + Send>>,
 }
 
 pub fn ply(
@@ -71,7 +77,7 @@ pub fn ply(
 impl Ply {
     pub fn register<F>(&mut self, s: &str, op: Operation, cb: F)
     where
-        F: Callback + Clone + 'static + Send + Sync,
+        F: Callback + Clone + 'static + Send,
     {
         self.tab.insert(key(s, &op), Box::new(cb));
     }
@@ -113,6 +119,18 @@ pub struct Publisher {
     redis_connection: MultiplexedConnection,
 }
 
+fn into_entry(msg: Msg) -> Result<Vec<(String, String)>> {
+    let mut v = vec![
+        (PRINCIPAL_FIELD.into(), msg.principal.clone()),
+        (KIND_FIELD.into(), msg.kind.clone()),
+        (ID_FIELD.into(), msg.id.clone()),
+        (OP_FIELD.into(), String::from(&msg.op)),
+    ];
+    let message: String = serde_json::to_string(&msg)?;
+    v.push((MESSAGE_FIELD.into(), message));
+    Ok(v)
+}
+
 impl Publisher {
     pub fn publish<T: ToMsg>(
         &self,
@@ -123,51 +141,106 @@ impl Publisher {
         let mut rc = self.redis_connection.clone();
         async move {
             let msg = entity.into_msg(principal, op);
-            let message: String = serde_json::to_string(&msg)?;
-            let entry: Vec<(String, String)> = vec![(MESSAGE_FIELD.into(), message)];
+            let entry = into_entry(msg)?;
             Ok(rc.xadd(EVENT_STREAM, REDIS_AUTO_ID, &entry).await?)
         }
+    }
+}
+
+struct State(String);
+
+impl State {
+    fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl TryFrom<Vec<u8>> for State {
+    type Error = JobError;
+
+    fn try_from(value: Vec<u8>) -> std::result::Result<Self, Self::Error> {
+        if value.len() == 0 {
+            Ok(State(String::from("0")))
+        } else {
+            Ok(State(
+                String::from_utf8(value).map_err(JobError::data_corruption)?,
+            ))
+        }
+    }
+}
+
+impl From<State> for Vec<u8> {
+    fn from(value: State) -> Self {
+        value.0.as_bytes().to_vec()
     }
 }
 
 #[async_trait]
 impl ply_jobs::Job for Consumer {
     async fn call(&mut self, state: Vec<u8>) -> std::result::Result<Vec<u8>, JobError> {
-        let mut last_seen = if state.len() == 0 {
-            String::from("0")
-        } else {
-            String::from_utf8(state).map_err(JobError::any)?
-        };
+        let mut last_processed: State = state.try_into()?;
         let opts = StreamReadOptions::default().count(20);
-        let results: StreamReadReply = self
+        let result: StreamReadReply = self
             .redis_connection
-            .xread_options(&[EVENT_STREAM], &[last_seen.as_str()], &opts)
+            .xread_options(&[EVENT_STREAM], &[last_processed.as_str()], &opts)
             .await
             .map_err(JobError::any)?;
 
-        // let entries = results.keys.first().ok_or_else(Error::TODO(String::from(
-        //     "reading streamyielded unexpected result",
-        // )))?;
-        let entries = results.keys.first().unwrap();
-        for id in &entries.ids {
-            match id.map.get(MESSAGE_FIELD) {
-                None => return Err(JobError::from("no message field in id")),
-                Some(Value::Data(data)) => {
-                    let msg: Msg = serde_json::from_slice(data).map_err(JobError::any)?;
-                    let key = key(&msg.kind, &msg.op);
-                    dbg!(&key);
-                    match self.tab.get(key.as_str()) {
-                        None => (),
-                        Some(z) => z.call(msg).await.map_err(JobError::any)?,
-                    }
-                }
-                Some(_) => {
-                    error!("unexpected value format"); // TODO How to report this properly
-                    continue;
-                }
+        let entry = result
+            .keys
+            .first()
+            .ok_or_else(|| JobError::from("reading stream yielded unexpected result"))?;
+        for stream_id in &entry.ids {
+            let id = stream_id.id.clone();
+            match into_meta(stream_id) {
+                Err(e) => error!("TODO cannot into meta: {}", e),
+                Ok(meta) => match self.tab.get(key(&meta.kind, &meta.op).as_str()) {
+                    None => (),
+                    Some(cb) => match serde_json::from_str::<Msg>(meta.message.as_str()) {
+                        Err(e) => error!("message parse failed: {}", e),
+                        Ok(msg) => match cb.call(msg).await {
+                            Ok(_) => {
+                                debug!("callback ok for {} {} {}", meta.kind, meta.op, meta.id)
+                            }
+                            Err(e) => {
+                                error!(
+                                    "callback failed for {} {} {}: {}",
+                                    meta.kind, meta.op, meta.id, e
+                                );
+                                break;
+                            }
+                        },
+                    },
+                },
             }
-            last_seen = id.id.clone();
+            last_processed = State(id);
         }
-        Ok(last_seen.as_bytes().to_vec())
+        Ok(last_processed.into())
     }
+}
+
+fn get(stream_id: &StreamId, field: &str) -> std::result::Result<String, Error> {
+    match stream_id.map.get(field) {
+        None => Err(Error::TODO(format!("field {} not set", field))),
+        Some(Value::Data(data)) => Ok(String::from_utf8(data.clone())?), //TODO
+        Some(_) => Err(Error::TODO(format!("field {} is not a data value", field))),
+    }
+}
+
+struct Meta {
+    principal: String,
+    kind: String,
+    id: String,
+    op: String,
+    message: String,
+}
+
+fn into_meta(stream_id: &StreamId) -> Result<Meta> {
+    Ok(Meta {
+        principal: get(stream_id, PRINCIPAL_FIELD)?,
+        kind: get(stream_id, KIND_FIELD)?,
+        id: get(stream_id, ID_FIELD)?,
+        op: get(stream_id, OP_FIELD)?,
+        message: get(stream_id, MESSAGE_FIELD)?,
+    })
 }
