@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use futures_util::future::BoxFuture;
 use futures_util::future::FutureExt;
-use log::{debug, error, info, trace};
+use log::{error, info};
 use ply_jobs::{schedule, JobConfig, JobError, JobManager, MongoRepo};
 use redis;
 use redis::aio::MultiplexedConnection;
@@ -9,9 +9,7 @@ use redis::streams::{StreamId, StreamReadOptions, StreamReadReply};
 use redis::{AsyncCommands, FromRedisValue, RedisResult, Value};
 use serde_json;
 use std::collections::HashMap;
-use std::fmt::Debug;
 use std::future::Future;
-use std::os::unix::prelude::DirEntryExt;
 use std::time::Duration;
 
 pub use error::{ok, Error, Result};
@@ -22,8 +20,8 @@ mod error;
 mod msg;
 mod operation;
 
-const JOB_COLLECTION: &str = "ply-jobs";
-const EVENT_STREAM: &str = "ply-events";
+const JOB_COLLECTION: &str = "consumer";
+const EVENT_STREAM: &str = "plyevents";
 const REDIS_AUTO_ID: &str = "*";
 const PRINCIPAL_FIELD: &str = "principal";
 const KIND_FIELD: &str = "kind";
@@ -66,8 +64,12 @@ pub fn ply(
     redis_connection: MultiplexedConnection,
     mongodb_client: mongodb::Client,
     mongodb_database: impl Into<String>,
+    mongodb_jobs_collection: impl Into<String>,
 ) -> Ply {
-    let job_manager = JobManager::new(instance, MongoRepo::new(mongodb_client, mongodb_database));
+    let job_manager = JobManager::new(
+        instance,
+        MongoRepo::new(mongodb_client, mongodb_database, mongodb_jobs_collection),
+    );
     Ply {
         redis_connection,
         job_manager,
@@ -140,6 +142,7 @@ impl Publisher {
         entity: T,
     ) -> impl Future<Output = Result<EventId>> {
         let mut rc = self.redis_connection.clone();
+        info!("XXX Publish {}", entity.id());
         async move {
             let msg = entity.into_msg(principal, op);
             let entry = into_entry(msg)?;
@@ -193,6 +196,7 @@ impl ply_jobs::Job for Consumer {
             .ok_or_else(|| JobError::from("reading stream yielded unexpected result"))?;
         for stream_id in &entry.ids {
             let id = stream_id.id.clone();
+            info!("XXX stream id {}", id);
             match into_meta(stream_id) {
                 Err(e) => error!("TODO cannot into meta: {}", e),
                 Ok(meta) => match self.tab.get(key(&meta.kind, &meta.op).as_str()) {
@@ -201,7 +205,7 @@ impl ply_jobs::Job for Consumer {
                         Err(e) => error!("message parse failed: {}", e),
                         Ok(msg) => match cb.call(msg).await {
                             Ok(_) => {
-                                debug!("callback ok for {} {} {}", meta.kind, meta.op, meta.id)
+                                info!("callback ok for {} {} {}", meta.kind, meta.op, meta.id)
                             }
                             Err(e) => {
                                 error!(

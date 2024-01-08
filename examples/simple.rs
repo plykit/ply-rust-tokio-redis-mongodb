@@ -37,7 +37,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mclient = mongodb::Client::with_uri_str("mongodb://localhost:27017").await?;
     let rconn = rclient.get_multiplexed_async_connection().await?;
 
-    let mut ply = ply(process::id().to_string(), rconn, mclient, "ply");
+    let mut ply = ply(process::id().to_string(), rconn, mclient, "ply", "jobs");
 
     // ply_main.register(Item::kind(), Operation::Create, async move |m: Msg| {
     //     //r.save(Default::default()).await.unwrap();
