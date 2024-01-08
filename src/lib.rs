@@ -191,39 +191,41 @@ impl ply_jobs::Job for Consumer {
             .await
             .map_err(JobError::any)?;
 
-        dbg!(&result);
-        dbg!(&result.keys);
-        let entry = result
-            .keys
-            .first()
-            .ok_or_else(|| JobError::from("reading stream yielded unexpected result"))?;
-        for stream_id in &entry.ids {
-            let id = stream_id.id.clone();
-            info!("XXX stream id {}", id);
-            match into_meta(stream_id) {
-                Err(e) => error!("TODO cannot into meta: {}", e),
-                Ok(meta) => match self.tab.get(key(&meta.kind, &meta.op).as_str()) {
-                    None => (),
-                    Some(cb) => match serde_json::from_str::<Msg>(meta.message.as_str()) {
-                        Err(e) => error!("message parse failed: {}", e),
-                        Ok(msg) => match cb.call(msg).await {
-                            Ok(_) => {
-                                info!("callback ok for {} {} {}", meta.kind, meta.op, meta.id)
-                            }
-                            Err(e) => {
-                                error!(
-                                    "callback failed for {} {} {}: {}",
-                                    meta.kind, meta.op, meta.id, e
-                                );
-                                break;
-                            }
+        match result.keys.first() {
+            None => Ok(last_processed.into()),
+            Some(entry) => {
+                for stream_id in &entry.ids {
+                    let id = stream_id.id.clone();
+                    info!("XXX stream id {}", id);
+                    match into_meta(stream_id) {
+                        Err(e) => error!("TODO cannot into meta: {}", e),
+                        Ok(meta) => match self.tab.get(key(&meta.kind, &meta.op).as_str()) {
+                            None => (),
+                            Some(cb) => match serde_json::from_str::<Msg>(meta.message.as_str()) {
+                                Err(e) => error!("message parse failed: {}", e),
+                                Ok(msg) => match cb.call(msg).await {
+                                    Ok(_) => {
+                                        info!(
+                                            "callback ok for {} {} {}",
+                                            meta.kind, meta.op, meta.id
+                                        )
+                                    }
+                                    Err(e) => {
+                                        error!(
+                                            "callback failed for {} {} {}: {}",
+                                            meta.kind, meta.op, meta.id, e
+                                        );
+                                        break;
+                                    }
+                                },
+                            },
                         },
-                    },
-                },
+                    }
+                    last_processed = State(id);
+                }
+                Ok(last_processed.into())
             }
-            last_processed = State(id);
         }
-        Ok(last_processed.into())
     }
 }
 
