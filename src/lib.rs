@@ -65,8 +65,9 @@ pub fn ply(
     instance: String,
     redis_connection: MultiplexedConnection,
     mongodb_client: mongodb::Client,
+    mongodb_database: impl Into<String>,
 ) -> Ply {
-    let job_manager = JobManager::new(instance, MongoRepo::new(mongodb_client));
+    let job_manager = JobManager::new(instance, MongoRepo::new(mongodb_client, mongodb_database));
     Ply {
         redis_connection,
         job_manager,
