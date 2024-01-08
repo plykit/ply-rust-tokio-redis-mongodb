@@ -1,6 +1,6 @@
 [package]
 name = "ply_tokio_redis_mongodb"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 description = "Implementation of ply for the technology combination of Redis and MongoDB"
 license = "MIT-0"

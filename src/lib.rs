@@ -164,7 +164,7 @@ impl TryFrom<Vec<u8>> for State {
 
     fn try_from(value: Vec<u8>) -> std::result::Result<Self, Self::Error> {
         if value.len() == 0 {
-            Ok(State(String::from("0")))
+            Ok(State(String::from("0-0")))
         } else {
             Ok(State(
                 String::from_utf8(value).map_err(JobError::data_corruption)?,
@@ -183,6 +183,7 @@ impl From<State> for Vec<u8> {
 impl ply_jobs::Job for Consumer {
     async fn call(&mut self, state: Vec<u8>) -> std::result::Result<Vec<u8>, JobError> {
         let mut last_processed: State = state.try_into()?;
+        info!("Last processed: {}", last_processed.0);
         let opts = StreamReadOptions::default().count(20);
         let result: StreamReadReply = self
             .redis_connection
@@ -190,6 +191,8 @@ impl ply_jobs::Job for Consumer {
             .await
             .map_err(JobError::any)?;
 
+        dbg!(&result);
+        dbg!(&result.keys);
         let entry = result
             .keys
             .first()
