@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use futures_util::future::BoxFuture;
 use futures_util::future::FutureExt;
-use log::{error, info};
+use log::{error, info, trace};
 use ply_jobs::{schedule, JobConfig, JobError, JobManager, MongoRepo};
 use redis;
 use redis::aio::MultiplexedConnection;
@@ -142,7 +142,7 @@ impl Publisher {
         entity: T,
     ) -> impl Future<Output = Result<EventId>> {
         let mut rc = self.redis_connection.clone();
-        info!("XXX Publish {}", entity.id());
+        trace!("XXX Publish {}", entity.id());
         async move {
             let msg = entity.into_msg(principal, op);
             let entry = into_entry(msg)?;
@@ -183,7 +183,7 @@ impl From<State> for Vec<u8> {
 impl ply_jobs::Job for Consumer {
     async fn call(&mut self, state: Vec<u8>) -> std::result::Result<Vec<u8>, JobError> {
         let mut last_processed: State = state.try_into()?;
-        info!("Last processed: {}", last_processed.0);
+        trace!("Last processed: {}", last_processed.0);
         let opts = StreamReadOptions::default().count(20);
         let result: StreamReadReply = self
             .redis_connection
@@ -196,7 +196,7 @@ impl ply_jobs::Job for Consumer {
             Some(entry) => {
                 for stream_id in &entry.ids {
                     let id = stream_id.id.clone();
-                    info!("XXX stream id {}", id);
+                    trace!("XXX stream id {}", id);
                     match into_meta(stream_id) {
                         Err(e) => error!("TODO cannot into meta: {}", e),
                         Ok(meta) => match self.tab.get(key(&meta.kind, &meta.op).as_str()) {
@@ -206,14 +206,14 @@ impl ply_jobs::Job for Consumer {
                                 Ok(msg) => match cb.call(msg).await {
                                     Ok(_) => {
                                         info!(
-                                            "callback ok for {} {} {}",
-                                            meta.kind, meta.op, meta.id
+                                            "ply callback ok: {} {} {} {}",
+                                            meta.principal, meta.kind, meta.op, meta.id
                                         )
                                     }
                                     Err(e) => {
                                         error!(
-                                            "callback failed for {} {} {}: {}",
-                                            meta.kind, meta.op, meta.id, e
+                                            "ply callback failed: {} {} {} {}: {}",
+                                            meta.principal, meta.kind, meta.op, meta.id, e
                                         );
                                         break;
                                     }

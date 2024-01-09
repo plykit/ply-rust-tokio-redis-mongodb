@@ -76,7 +76,6 @@ pub fn make(http_client: reqwest::Client) -> impl Callback + Clone + Send + 'sta
     move |m: Msg| {
         let hc = http_client.clone();
         async move {
-            info!("callback: Principal: {}", m.principal);
             let item = Item::from_bytes(m.bytes);
             println!("Item: {} {}: {:?}", m.principal, m.id, item);
 
